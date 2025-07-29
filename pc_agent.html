@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>EchoRelay Client</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- Include the MQTT.js library from a CDN -->
+    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+    <style>
+        body { font-family: sans-serif; background-color: #282c34; color: white; text-align: center; padding: 20px; }
+        h1 { color: #61dafb; }
+        button { font-size: 18px; padding: 15px 30px; margin: 10px; border-radius: 8px; border: none; cursor: pointer; }
+        #connectBtn { background-color: #4CAF50; color: white; }
+        #disconnectBtn { background-color: #f44336; color: white; }
+        .mic-btn { background-color: #008CBA; color: white; }
+        .muted { background-color: #555 !important; }
+        #status { margin-top: 20px; font-style: italic; color: #ccc; }
+    </style>
+</head>
+<body>
+
+    <h1>EchoRelay Client</h1>
+
+    <button id="connectBtn">Connect</button>
+    <button id="disconnectBtn" style="display:none;">Disconnect</button>
+
+    <hr>
+
+    <button id="micBtn" class="mic-btn muted" disabled>Toggle My Mic (Muted)</button>
+
+    <p id="status">Status: Disconnected</p>
+
+    <script>
+        // --- Configuration ---
+        const MQTT_BROKER_URL = "wss://broker.hivemq.com:8884/mqtt"; // Use WSS for web clients
+        // IMPORTANT: These must EXACTLY match the topics in the Python script
+        const TOPIC_PHONE_LISTEN = "echorelay/hassan2020/pc_to_phone";
+        const TOPIC_PHONE_SPEAK = "echorelay/hassan2020/phone_to_pc";
+
+        const connectBtn = document.getElementById('connectBtn');
+        const disconnectBtn = document.getElementById('disconnectBtn');
+        const micBtn = document.getElementById('micBtn');
+        const statusEl = document.getElementById('status');
+
+        let client = null;
+        let audioContext = null;
+        let mediaStream = null;
+        let scriptProcessor = null;
+        let isMuted = true;
+
+        // --- Event Listeners ---
+        connectBtn.addEventListener('click', connect);
+        disconnectBtn.addEventListener('click', disconnect);
+        micBtn.addEventListener('click', toggleMic);
+
+        // --- Functions ---
+        function connect() {
+            statusEl.textContent = "Status: Connecting...";
+            client = mqtt.connect(MQTT_BROKER_URL);
+
+            client.on('connect', () => {
+                statusEl.textContent = "Status: Connected!";
+                connectBtn.style.display = 'none';
+                disconnectBtn.style.display = 'inline-block';
+                micBtn.disabled = false;
+
+                // Subscribe to the topic to hear the PC's mic
+                client.subscribe(TOPIC_PHONE_LISTEN, (err) => {
+                    if (err) {
+                        statusEl.textContent = "Subscription failed!";
+                    } else {
+                        statusEl.textContent = "Status: Connected & Listening!";
+                    }
+                });
+            });
+
+            client.on('message', (topic, payload) => {
+                // This is audio from the PC. Play it.
+                playAudio(payload);
+            });
+
+            client.on('error', (err) => {
+                statusEl.textContent = `Error: ${err.message}`;
+                disconnect();
+            });
+
+            client.on('close', () => {
+                if (connectBtn.style.display === 'none') {
+                    statusEl.textContent = "Status: Disconnected";
+                    disconnect();
+                }
+            });
+        }
+
+        function disconnect() {
+            if (client) {
+                client.end();
+                client = null;
+            }
+            stopMicrophone();
+            connectBtn.style.display = 'inline-block';
+            disconnectBtn.style.display = 'none';
+            micBtn.disabled = true;
+            micBtn.classList.add('muted');
+            micBtn.textContent = 'Toggle My Mic (Muted)';
+            isMuted = true;
+            statusEl.textContent = "Status: Disconnected";
+        }
+        
+        async function playAudio(arrayBuffer) {
+            if (!audioContext) {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+            }
+            // The received payload needs to be converted for the Web Audio API
+            const float32Array = new Float32Array(arrayBuffer.length / 2);
+            for (let i = 0; i < arrayBuffer.length; i += 2) {
+                let val = (arrayBuffer[i+1] << 8) | arrayBuffer[i];
+                if (val >= 32768) val -= 65536; // Convert to signed 16-bit
+                float32Array[i/2] = val / 32768.0; // Normalize to -1.0 to 1.0
+            }
+            const audioBuffer = audioContext.createBuffer(1, float32Array.length, 16000);
+            audioBuffer.copyToChannel(float32Array, 0);
+
+            const source = audioContext.createBufferSource();
+            source.buffer = audioBuffer;
+            source.connect(audioContext.destination);
+            source.start();
+        }
+
+        async function startMicrophone() {
+            if (!audioContext) {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+            }
+            mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            const source = audioContext.createMediaStreamSource(mediaStream);
+            scriptProcessor = audioContext.createScriptProcessor(1024, 1, 1);
+            
+            scriptProcessor.onaudioprocess = (e) => {
+                if (isMuted) return;
+                const inputData = e.inputBuffer.getChannelData(0);
+                // Convert float audio to 16-bit PCM for PyAudio
+                const pcmData = new Int16Array(inputData.length);
+                for (let i = 0; i < inputData.length; i++) {
+                    pcmData[i] = Math.max(-1, Math.min(1, inputData[i])) * 32767;
+                }
+                if (client && client.connected) {
+                    // *** THIS IS THE FINAL CORRECTED LINE ***
+                    client.publish(TOPIC_PHONE_SPEAK, new Uint8Array(pcmData.buffer));
+                }
+            };
+            source.connect(scriptProcessor);
+            scriptProcessor.connect(audioContext.destination);
+        }
+
+        function stopMicrophone() {
+            if (mediaStream) {
+                mediaStream.getTracks().forEach(track => track.stop());
+                mediaStream = null;
+            }
+            if (scriptProcessor) {
+                scriptProcessor.disconnect();
+                scriptProcessor = null;
+            }
+        }
+        
+        function toggleMic() {
+            isMuted = !isMuted;
+            if (isMuted) {
+                micBtn.classList.add('muted');
+                micBtn.textContent = 'Toggle My Mic (Muted)';
+                stopMicrophone(); // Stop mic to save battery
+            } else {
+                micBtn.classList.remove('muted');
+                micBtn.textContent = 'Toggle My Mic (LIVE)';
+                startMicrophone(); // Start mic when unmuted
+            }
+        }
+    </script>
+</body>
+</html>
