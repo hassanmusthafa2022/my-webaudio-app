@@ -41,13 +41,10 @@
     <script>
         // --- Configuration ---
         const MQTT_BROKER_URL = "wss://broker.hivemq.com:8884/mqtt";
-        // --- IMPORTANT: Change 'your_secret_code' to be the same as in the Python file! ---
         const SECRET_CODE = "hashas123"; 
         const TOPIC_PHONE_LISTEN_AUDIO = `echorelay/${SECRET_CODE}/pc_to_phone`;
         const TOPIC_PHONE_SPEAK_AUDIO = `echorelay/${SECRET_CODE}/phone_to_pc`;
         const TOPIC_PHONE_STATUS = `echorelay/${SECRET_CODE}/phone_status`;
-
-        // Audio rate must match the Python script to avoid distortion.
         const SAMPLE_RATE = 8000;
         
         // --- Element References ---
@@ -80,16 +77,13 @@
         // --- Functions ---
         async function connect() {
             statusEl.textContent = "Status: Connecting...";
-            
             try {
-                // Use the new SAMPLE_RATE variable
                 if (!audioContext) audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
                 mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true }); 
             } catch (err) {
                 statusEl.textContent = "Error: Microphone permission denied.";
                 return;
             }
-
             client = mqtt.connect(MQTT_BROKER_URL);
             client.on('connect', () => {
                 statusEl.textContent = "Status: Connected!";
@@ -116,7 +110,6 @@
         }
 
         async function playAudio(arrayBuffer) {
-            // Use the new SAMPLE_RATE variable
             if (!audioContext) audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
             if (!pcAnalyser) {
                 pcAnalyser = audioContext.createAnalyser();
@@ -143,15 +136,11 @@
             pttBtn.classList.add('active');
             pttBtn.textContent = 'TALKING...';
             client.publish(TOPIC_PHONE_STATUS, "TALKING");
-
-            // Use the new SAMPLE_RATE variable
             if (!audioContext) audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SAMPLE_RATE });
             phoneAnalyser = audioContext.createAnalyser();
             phoneAnalyser.fftSize = 256;
-            
             const source = audioContext.createMediaStreamSource(mediaStream);
             scriptProcessor = audioContext.createScriptProcessor(1024, 1, 1);
-            
             scriptProcessor.onaudioprocess = (e) => {
                 const inputData = e.inputBuffer.getChannelData(0);
                 const pcmData = new Int16Array(inputData.length);
@@ -170,12 +159,7 @@
             pttBtn.textContent = 'Hold to Talk';
             if (phoneAnimationId) { cancelAnimationFrame(phoneAnimationId); phoneAnimationId = null; }
             phoneCanvasCtx.clearRect(0, 0, phoneCanvas.width, phoneCanvas.height);
-            
-            if (scriptProcessor) {
-                scriptProcessor.disconnect();
-                scriptProcessor = null;
-            }
-            
+            if (scriptProcessor) { scriptProcessor.disconnect(); scriptProcessor = null; }
             if (client && client.connected) {
                 client.publish(TOPIC_PHONE_STATUS, "LISTENING");
             }
@@ -217,7 +201,7 @@
                 phoneCanvasCtx.fillStyle = '#20232a';
                 phoneCanvasCtx.fillRect(0, 0, phoneCanvas.width, phoneCanvas.height);
                 phoneCanvasCtx.lineWidth = 2;
-                phoneCanvasCtx.strokeStyle = '#4CAF50'; // Green for student
+                phoneCanvasCtx.strokeStyle = '#4CAF50';
                 phoneCanvasCtx.beginPath();
                 const sliceWidth = phoneCanvas.width * 1.0 / bufferLength;
                 let x = 0;
