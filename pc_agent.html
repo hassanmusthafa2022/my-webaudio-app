@@ -2,177 +2,236 @@
 <html>
 <head>
     <title>EchoRelay Client</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <!-- Include the MQTT.js library from a CDN -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
     <style>
-        body { font-family: sans-serif; background-color: #282c34; color: white; text-align: center; padding: 20px; }
-        h1 { color: #61dafb; }
-        button { font-size: 18px; padding: 15px 30px; margin: 10px; border-radius: 8px; border: none; cursor: pointer; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #282c34; color: white; text-align: center; padding: 10px; -webkit-user-select: none; user-select: none; }
+        h1 { color: #61dafb; margin-bottom: 10px; }
+        button { font-size: 16px; padding: 12px 24px; margin: 8px; border-radius: 8px; border: none; cursor: pointer; transition: background-color 0.2s; }
         #connectBtn { background-color: #4CAF50; color: white; }
         #disconnectBtn { background-color: #f44336; color: white; }
-        .mic-btn { background-color: #008CBA; color: white; }
-        .muted { background-color: #555 !important; }
-        #status { margin-top: 20px; font-style: italic; color: #ccc; }
+        #pttBtn { background-color: #008CBA; color: white; padding: 25px; border-radius: 50%; width: 140px; height: 140px; line-height: 1.2; font-weight: bold; }
+        #pttBtn.active { background-color: #ff4757; transform: scale(1.05); }
+        #status { margin-top: 15px; font-style: italic; color: #ccc; }
+        .waveform-container { display: flex; justify-content: space-around; margin: 20px auto; width: 100%; max-width: 400px; }
+        .waveform-box { display: flex; flex-direction: column; align-items: center; }
+        canvas { background-color: #20232a; border-radius: 5px; border: 1px solid #444; }
+        .waveform-box p { margin-bottom: 5px; font-size: 14px; }
     </style>
 </head>
 <body>
-
-    <h1>EchoRelay Client</h1>
-
+    <h1>Classroom Audio</h1>
     <button id="connectBtn">Connect</button>
     <button id="disconnectBtn" style="display:none;">Disconnect</button>
-
-    <hr>
-
-    <button id="micBtn" class="mic-btn muted" disabled>Toggle My Mic (Muted)</button>
-
     <p id="status">Status: Disconnected</p>
+    
+    <div class="waveform-container">
+        <div class="waveform-box">
+            <p>Teacher's Voice</p>
+            <canvas id="pcWaveform" width="150" height="75"></canvas>
+        </div>
+        <div class="waveform-box">
+            <p>My Voice</p>
+            <canvas id="phoneWaveform" width="150" height="75"></canvas>
+        </div>
+    </div>
+
+    <button id="pttBtn" disabled>Hold to Talk</button>
 
     <script>
         // --- Configuration ---
-        const MQTT_BROKER_URL = "wss://broker.hivemq.com:8884/mqtt"; // Use WSS for web clients
-        // IMPORTANT: These must EXACTLY match the topics in the Python script
-        const TOPIC_PHONE_LISTEN = "echorelay/hassan2020/pc_to_phone";
-        const TOPIC_PHONE_SPEAK = "echorelay/hassan2020/phone_to_pc";
+        const MQTT_BROKER_URL = "wss://broker.hivemq.com:8884/mqtt";
+        // --- IMPORTANT: Change 'your_secret_code' to be the same as in the Python file! ---
+        const SECRET_CODE = "123hassan"; 
+        const TOPIC_PHONE_LISTEN_AUDIO = `echorelay/${SECRET_CODE}/pc_to_phone`;
+        const TOPIC_PHONE_SPEAK_AUDIO = `echorelay/${SECRET_CODE}/phone_to_pc`;
+        const TOPIC_PHONE_STATUS = `echorelay/${SECRET_CODE}/phone_status`;
 
+        // --- Element References ---
         const connectBtn = document.getElementById('connectBtn');
         const disconnectBtn = document.getElementById('disconnectBtn');
-        const micBtn = document.getElementById('micBtn');
+        const pttBtn = document.getElementById('pttBtn');
         const statusEl = document.getElementById('status');
+        const pcCanvas = document.getElementById('pcWaveform');
+        const pcCanvasCtx = pcCanvas.getContext('2d');
+        const phoneCanvas = document.getElementById('phoneWaveform');
+        const phoneCanvasCtx = phoneCanvas.getContext('2d');
 
+        // --- Global Variables ---
         let client = null;
         let audioContext = null;
-        let mediaStream = null;
+        let mediaStream = null; // Will hold the microphone stream
         let scriptProcessor = null;
-        let isMuted = true;
+        let pcAnalyser = null;
+        let phoneAnalyser = null;
+        let phoneAnimationId = null;
 
         // --- Event Listeners ---
         connectBtn.addEventListener('click', connect);
         disconnectBtn.addEventListener('click', disconnect);
-        micBtn.addEventListener('click', toggleMic);
+        pttBtn.addEventListener('mousedown', startTalking);
+        pttBtn.addEventListener('mouseup', stopTalking);
+        pttBtn.addEventListener('touchstart', (e) => { e.preventDefault(); startTalking(); });
+        pttBtn.addEventListener('touchend', (e) => { e.preventDefault(); stopTalking(); });
 
         // --- Functions ---
-        function connect() {
+        async function connect() {
             statusEl.textContent = "Status: Connecting...";
-            client = mqtt.connect(MQTT_BROKER_URL);
+            
+            // Get microphone permission ONCE on connect
+            try {
+                if (!audioContext) audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+                // Get the mic stream but don't use it yet. This asks for permission.
+                mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true }); 
+            } catch (err) {
+                statusEl.textContent = "Error: Microphone permission denied.";
+                return;
+            }
 
+            client = mqtt.connect(MQTT_BROKER_URL);
             client.on('connect', () => {
                 statusEl.textContent = "Status: Connected!";
                 connectBtn.style.display = 'none';
                 disconnectBtn.style.display = 'inline-block';
-                micBtn.disabled = false;
-
-                // Subscribe to the topic to hear the PC's mic
-                client.subscribe(TOPIC_PHONE_LISTEN, (err) => {
-                    if (err) {
-                        statusEl.textContent = "Subscription failed!";
-                    } else {
-                        statusEl.textContent = "Status: Connected & Listening!";
-                    }
+                pttBtn.disabled = false;
+                client.subscribe(TOPIC_PHONE_LISTEN_AUDIO, (err) => {
+                    if (!err) statusEl.textContent = "Status: Connected & Listening!";
                 });
             });
-
-            client.on('message', (topic, payload) => {
-                // This is audio from the PC. Play it.
-                playAudio(payload);
-            });
-
-            client.on('error', (err) => {
-                statusEl.textContent = `Error: ${err.message}`;
-                disconnect();
-            });
-
-            client.on('close', () => {
-                if (connectBtn.style.display === 'none') {
-                    statusEl.textContent = "Status: Disconnected";
-                    disconnect();
-                }
-            });
+            client.on('message', (topic, payload) => playAudio(payload));
+            client.on('error', (err) => { statusEl.textContent = `Error: ${err.message}`; disconnect(); });
+            client.on('close', () => { if (connectBtn.style.display === 'none') { disconnect(); } });
         }
 
         function disconnect() {
-            if (client) {
-                client.end();
-                client = null;
-            }
-            stopMicrophone();
-            connectBtn.style.display = 'inline-block';
-            disconnectBtn.style.display = 'none';
-            micBtn.disabled = true;
-            micBtn.classList.add('muted');
-            micBtn.textContent = 'Toggle My Mic (Muted)';
-            isMuted = true;
-            statusEl.textContent = "Status: Disconnected";
-        }
-        
-        async function playAudio(arrayBuffer) {
-            if (!audioContext) {
-                audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-            }
-            // The received payload needs to be converted for the Web Audio API
-            const float32Array = new Float32Array(arrayBuffer.length / 2);
-            for (let i = 0; i < arrayBuffer.length; i += 2) {
-                let val = (arrayBuffer[i+1] << 8) | arrayBuffer[i];
-                if (val >= 32768) val -= 65536; // Convert to signed 16-bit
-                float32Array[i/2] = val / 32768.0; // Normalize to -1.0 to 1.0
-            }
-            const audioBuffer = audioContext.createBuffer(1, float32Array.length, 16000);
-            audioBuffer.copyToChannel(float32Array, 0);
-
-            const source = audioContext.createBufferSource();
-            source.buffer = audioBuffer;
-            source.connect(audioContext.destination);
-            source.start();
-        }
-
-        async function startMicrophone() {
-            if (!audioContext) {
-                audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-            }
-            mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            const source = audioContext.createMediaStreamSource(mediaStream);
-            scriptProcessor = audioContext.createScriptProcessor(1024, 1, 1);
-            
-            scriptProcessor.onaudioprocess = (e) => {
-                if (isMuted) return;
-                const inputData = e.inputBuffer.getChannelData(0);
-                // Convert float audio to 16-bit PCM for PyAudio
-                const pcmData = new Int16Array(inputData.length);
-                for (let i = 0; i < inputData.length; i++) {
-                    pcmData[i] = Math.max(-1, Math.min(1, inputData[i])) * 32767;
-                }
-                if (client && client.connected) {
-                    // *** THIS IS THE FINAL CORRECTED LINE ***
-                    client.publish(TOPIC_PHONE_SPEAK, new Uint8Array(pcmData.buffer));
-                }
-            };
-            source.connect(scriptProcessor);
-            scriptProcessor.connect(audioContext.destination);
-        }
-
-        function stopMicrophone() {
+            if (client) { client.end(); client = null; }
+            stopTalking(); 
+            // Also stop the main media stream on disconnect
             if (mediaStream) {
                 mediaStream.getTracks().forEach(track => track.stop());
                 mediaStream = null;
             }
+            connectBtn.style.display = 'inline-block';
+            disconnectBtn.style.display = 'none';
+            pttBtn.disabled = true;
+            statusEl.textContent = "Status: Disconnected";
+        }
+
+        async function playAudio(arrayBuffer) {
+            if (!audioContext) audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+            if (!pcAnalyser) {
+                pcAnalyser = audioContext.createAnalyser();
+                pcAnalyser.fftSize = 256;
+                drawWaveform(pcAnalyser, pcCanvasCtx, '#61dafb'); // Blue for teacher
+            }
+            const float32Array = new Float32Array(arrayBuffer.length / 2);
+            for (let i = 0; i < arrayBuffer.length; i += 2) {
+                let val = (arrayBuffer[i + 1] << 8) | arrayBuffer[i];
+                if (val >= 32768) val -= 65536;
+                float32Array[i / 2] = val / 32768.0;
+            }
+            const audioBuffer = audioContext.createBuffer(1, float32Array.length, 16000);
+            audioBuffer.copyToChannel(float32Array, 0);
+            const source = audioContext.createBufferSource();
+            source.buffer = audioBuffer;
+            source.connect(pcAnalyser);
+            pcAnalyser.connect(audioContext.destination);
+            source.start();
+        }
+
+        async function startTalking() {
+            if (pttBtn.disabled || !client || !client.connected || !mediaStream) return;
+            pttBtn.classList.add('active');
+            pttBtn.textContent = 'TALKING...';
+            client.publish(TOPIC_PHONE_STATUS, "TALKING");
+
+            phoneAnalyser = audioContext.createAnalyser();
+            phoneAnalyser.fftSize = 256;
+            
+            // Use the existing mediaStream instead of getting a new one
+            const source = audioContext.createMediaStreamSource(mediaStream);
+            scriptProcessor = audioContext.createScriptProcessor(1024, 1, 1);
+            
+            scriptProcessor.onaudioprocess = (e) => {
+                const inputData = e.inputBuffer.getChannelData(0);
+                const pcmData = new Int16Array(inputData.length);
+                for (let i = 0; i < inputData.length; i++) pcmData[i] = Math.max(-1, Math.min(1, inputData[i])) * 32767;
+                if (client && client.connected) client.publish(TOPIC_PHONE_SPEAK_AUDIO, new Uint8Array(pcmData.buffer));
+            };
+            source.connect(phoneAnalyser);
+            phoneAnalyser.connect(scriptProcessor);
+            scriptProcessor.connect(audioContext.destination);
+            drawPhoneWaveform();
+        }
+
+        function stopTalking() {
+            if (pttBtn.disabled) return;
+            pttBtn.classList.remove('active');
+            pttBtn.textContent = 'Hold to Talk';
+            if (phoneAnimationId) { cancelAnimationFrame(phoneAnimationId); phoneAnimationId = null; }
+            phoneCanvasCtx.clearRect(0, 0, phoneCanvas.width, phoneCanvas.height);
+            
             if (scriptProcessor) {
                 scriptProcessor.disconnect();
                 scriptProcessor = null;
             }
+            
+            if (client && client.connected) {
+                client.publish(TOPIC_PHONE_STATUS, "LISTENING");
+            }
         }
         
-        function toggleMic() {
-            isMuted = !isMuted;
-            if (isMuted) {
-                micBtn.classList.add('muted');
-                micBtn.textContent = 'Toggle My Mic (Muted)';
-                stopMicrophone(); // Stop mic to save battery
-            } else {
-                micBtn.classList.remove('muted');
-                micBtn.textContent = 'Toggle My Mic (LIVE)';
-                startMicrophone(); // Start mic when unmuted
+        function drawWaveform(analyser, canvasCtx, color) {
+            const bufferLength = analyser.frequencyBinCount;
+            const dataArray = new Uint8Array(bufferLength);
+            canvasCtx.clearRect(0, 0, canvasCtx.canvas.width, canvasCtx.canvas.height);
+            function draw() {
+                requestAnimationFrame(draw);
+                analyser.getByteTimeDomainData(dataArray);
+                canvasCtx.fillStyle = '#20232a';
+                canvasCtx.fillRect(0, 0, canvasCtx.canvas.width, canvasCtx.canvas.height);
+                canvasCtx.lineWidth = 2;
+                canvasCtx.strokeStyle = color;
+                canvasCtx.beginPath();
+                const sliceWidth = canvasCtx.canvas.width * 1.0 / bufferLength;
+                let x = 0;
+                for (let i = 0; i < bufferLength; i++) {
+                    const v = dataArray[i] / 128.0;
+                    const y = v * canvasCtx.canvas.height / 2;
+                    if (i === 0) canvasCtx.moveTo(x, y);
+                    else canvasCtx.lineTo(x, y);
+                    x += sliceWidth;
+                }
+                canvasCtx.lineTo(canvasCtx.canvas.width, canvasCtx.canvas.height / 2);
+                canvasCtx.stroke();
             }
+            draw();
+        }
+
+        function drawPhoneWaveform() {
+            const bufferLength = phoneAnalyser.frequencyBinCount;
+            const dataArray = new Uint8Array(bufferLength);
+            function draw() {
+                phoneAnimationId = requestAnimationFrame(draw);
+                phoneAnalyser.getByteTimeDomainData(dataArray);
+                phoneCanvasCtx.fillStyle = '#20232a';
+                phoneCanvasCtx.fillRect(0, 0, phoneCanvas.width, phoneCanvas.height);
+                phoneCanvasCtx.lineWidth = 2;
+                phoneCanvasCtx.strokeStyle = '#4CAF50'; // Green for student
+                phoneCanvasCtx.beginPath();
+                const sliceWidth = phoneCanvas.width * 1.0 / bufferLength;
+                let x = 0;
+                for (let i = 0; i < bufferLength; i++) {
+                    const v = dataArray[i] / 128.0;
+                    const y = v * phoneCanvas.height / 2;
+                    if (i === 0) phoneCanvasCtx.moveTo(x, y);
+                    else phoneCanvasCtx.lineTo(x, y);
+                    x += sliceWidth;
+                }
+                phoneCanvasCtx.lineTo(phoneCanvas.width, phoneCanvas.height / 2);
+                phoneCanvasCtx.stroke();
+            }
+            draw();
         }
     </script>
 </body>
